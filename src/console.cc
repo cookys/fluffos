@@ -10,13 +10,95 @@
  *               Isaac Charles (Hamlet@Discworld, etc) -- Jul 2008
  */
 
-#include "std.h"
+#include "base/std.h"
+
+#include "console.h"
+
+#include <errno.h>         // for errno
+#include <event2/event.h>  // for EV_READ, event_add, etc
+#include <event2/util.h>   // for evutil_socket_t
+#include <fcntl.h>         // for fcntl, F_SETFL, F_GETFL, etc
+#include <limits.h>        // for INT_MAX
+#include <signal.h>        // for signal, SIGTTIN, SIG_IGN, etc
+#include <stddef.h>        // for size_t
+#include <stdio.h>         // for printf, puts, sscanf, etc
+#include <stdlib.h>        // for qsort, NULL
+#include <string.h>        // for strlen, strncmp, strchr, etc
+#include <time.h>          // for time
+#include <unistd.h>        // for STDIN_FILENO, read
+
+#include "vm/vm.h"
 
 #ifdef HAS_CONSOLE
-#include "comm.h"
-#include "dumpstat.h"
-#include "event.h"
-#include "lpc_incl.h"
+#include "packages/core/dumpstat.h"
+#endif
+
+#ifdef HAS_CONSOLE
+int has_console = -1;
+#endif
+
+#ifdef HAS_CONSOLE
+static void sig_ttin(int);
+#endif
+
+void restore_sigttin(void) {
+  if (has_console >= 0) {
+    signal(SIGTTIN, sig_ttin);
+  }
+}
+
+/* The console goes to sleep when backgrounded and can
+ * be woken back up with kill -SIGTTIN <pid>
+ */
+static void sig_ttin(int sig) {
+  char junk[1024];
+  int fl;
+
+  has_console = !has_console;
+
+  signal(SIGTTIN, SIG_IGN);
+
+  if (has_console) {
+    /* now eat all the gibberish they typed in the console when it was dead */
+    fl = fcntl(STDIN_FILENO, F_GETFL);
+    fcntl(STDIN_FILENO, F_SETFL, fl | O_NONBLOCK);
+
+    while (read(STDIN_FILENO, junk, 1023) > 0) {
+      ;
+    } /* ; */
+
+    /* leaving the output nonblocking is a bad idea.  large outputs tend
+         to get truncated.
+     */
+    fcntl(STDIN_FILENO, F_SETFL, fl);
+  }
+}
+
+static void on_console_event(evutil_socket_t fd, short what, void *arg) {
+  debug(event, "Got an event on stdin socket %d:%s%s%s%s \n", (int)fd,
+        (what & EV_TIMEOUT) ? " timeout" : "", (what & EV_READ) ? " read" : "",
+        (what & EV_WRITE) ? " write" : "", (what & EV_SIGNAL) ? " signal" : "");
+
+  if (has_console <= 0) {
+    event_del((struct event *)arg);
+    return;
+  }
+  on_console_input();
+}
+
+void console_init(struct event_base *base) {
+  if (has_console >= 0) {
+    signal(SIGTTIN, sig_ttin);
+  }
+  signal(SIGTTOU, SIG_IGN);
+
+  if (has_console > 0) {
+    debug_message("Opening console... \n");
+    struct event *ev_console = NULL;
+    ev_console = event_new(base, STDIN_FILENO, EV_READ | EV_PERSIST, on_console_event, ev_console);
+    event_add(ev_console, NULL);
+  }
+}
 
 #define NAME_LEN 50
 
@@ -36,10 +118,8 @@ static int objcmpidle(const void *, const void *);
 
 static void console_command(char *s);
 
-static void print_obj(int refs, int cpy, const char *obname, long lastref,
-                      long sz) {
-  printf("%4d %4d %-*s %5ld %10ld\n", refs, cpy, NAME_LEN, obname,
-         ((long)time(0) - lastref), sz);
+static void print_obj(int refs, int cpy, const char *obname, long lastref, long sz) {
+  printf("%4d %4d %-*s %5ld %10ld\n", refs, cpy, NAME_LEN, obname, ((long)time(0) - lastref), sz);
 }
 
 void on_console_input() {
@@ -106,9 +186,8 @@ static void console_command(char *s) {
       num[0] = 0;
       num[1] = INT_MAX;
 
-      if ((numargs = sscanf(s, "%10s %159s %159s %159s", verb, args[0], args[1],
-                            args[2]) -
-                     1) >= 1) {
+      if ((numargs = sscanf(s, "%10s %159s %159s %159s", verb, args[0], args[1], args[2]) - 1) >=
+          1) {
         int tmp;
         char *pos;
 
@@ -125,8 +204,7 @@ static void console_command(char *s) {
             *pos++ = '-';
           }
 
-          if ((tmp = sscanf(args[numargs - 1], "%d..%d", &num[0], &num[1])) ==
-              2) {
+          if ((tmp = sscanf(args[numargs - 1], "%d..%d", &num[0], &num[1])) == 2) {
           } else if (tmp == 1) {
             if (args[numargs - 1][strlen(args[numargs - 1]) - 1] != '.') {
               if (num[0] == 0) {
@@ -172,14 +250,13 @@ static void console_command(char *s) {
             qsort(list, (size_t)count, sizeof(object_t *), objcmpsize);
           } else if (strncmp("idle", args[0], strlen(args[0])) == 0) {
             qsort(list, (size_t)count, sizeof(object_t *), objcmpidle);
-          } else {/* This should be "totals" or "depth" */
+          } else { /* This should be "totals" or "depth" */
             TOTALS = (char)1;
             qsort(list, (size_t)count, sizeof(object_t *), objcmpalpha);
           }
         }
 
-        printf("%4s %4s %-*s %5s %10s\n", "Rf", "Cpy", NAME_LEN, "Obj", "Idle",
-               "Size");
+        printf("%4s %4s %-*s %5s %10s\n", "Rf", "Cpy", NAME_LEN, "Obj", "Idle", "Size");
 
         if (TOTALS && (count > 1)) {
           ITEMS it[count + 1];
@@ -203,11 +280,9 @@ static void console_command(char *s) {
                   slash++;
                 }
 
-              strncpy(it[lst].name,
-                      list[i]->obname +
-                          (((slash - list[i]->obname) > NAME_LEN)
-                               ? ((slash - list[i]->obname) - NAME_LEN)
-                               : 0),
+              strncpy(it[lst].name, list[i]->obname + (((slash - list[i]->obname) > NAME_LEN)
+                                                           ? ((slash - list[i]->obname) - NAME_LEN)
+                                                           : 0),
                       NAME_LEN);
               it[lst].name[slash - list[i]->obname] = '\0';
 
@@ -219,8 +294,7 @@ static void console_command(char *s) {
 
             it[lst].cpy++;
             it[lst].ref += list[i]->ref;
-            it[lst].mem += list[i]->prog->total_size + data_size(list[i]) +
-                           sizeof(object_t);
+            it[lst].mem += list[i]->prog->total_size + data_size(list[i]) + sizeof(object_t);
             if (((long)list[i]->time_of_ref < it[lst].idle) || !it[lst].idle) {
               it[lst].idle = (long)list[i]->time_of_ref;
             }
@@ -250,8 +324,7 @@ static void console_command(char *s) {
 
           for (i = num[0]; i <= num[1]; i++) {
             if (!prefix || (strncmp(it[i].name, prefix, plen) == 0)) {
-              print_obj(it[i].ref, it[i].cpy, it[i].name, it[i].idle,
-                        it[i].mem);
+              print_obj(it[i].ref, it[i].cpy, it[i].name, it[i].idle, it[i].mem);
               totsz += it[i].mem;
             }
           }
@@ -275,19 +348,16 @@ static void console_command(char *s) {
 
           for (i = num[0]; i <= num[1]; i++) {
             if (!prefix || (strncmp(list[i]->obname, prefix, plen) == 0)) {
-              print_obj((int)list[i]->ref, 1, list[i]->obname,
-                        (long)list[i]->time_of_ref,
-                        sz = (long)list[i]->prog->total_size +
-                             (long)data_size(list[i]) + (long)sizeof(object_t));
+              print_obj((int)list[i]->ref, 1, list[i]->obname, (long)list[i]->time_of_ref,
+                        sz = (long)list[i]->prog->total_size + (long)data_size(list[i]) +
+                             (long)sizeof(object_t));
               totsz += sz;
             }
           }
         }
 
-        printf("%4s %4s %-*s %5s %10s\n", "", "", NAME_LEN, "-----", "-----",
-               "----------");
-        printf("%4s %4s %*d %-5s %10ld\n", "", "", NAME_LEN,
-               1 + num[1] - num[0], "objs", totsz);
+        printf("%4s %4s %-*s %5s %10s\n", "", "", NAME_LEN, "-----", "-----", "----------");
+        printf("%4s %4s %*d %-5s %10ld\n", "", "", NAME_LEN, 1 + num[1] - num[0], "objs", totsz);
         pop_stack();
       } else {
         (void)puts("Unknown command.");
@@ -305,8 +375,8 @@ static void console_command(char *s) {
 static int strcmpalpha(const char *aname, const char *bname, int depth) {
   int slash = 0;
 
-  for (; (*aname == *bname) && (*aname != '#') && (*bname != '#') &&
-             (*aname != '\0') && (*bname != '\0');
+  for (; (*aname == *bname) && (*aname != '#') && (*bname != '#') && (*aname != '\0') &&
+             (*bname != '\0');
        aname++, bname++) {
     if (*aname == '/') {
       slash++;
@@ -318,8 +388,7 @@ static int strcmpalpha(const char *aname, const char *bname, int depth) {
   }
 
   if ((*aname == '#') || ((slash == depth) && (*aname == '/'))) {
-    if ((*bname != '#') && (*bname != '\0') &&
-        ((slash != depth) || (*bname != '/'))) {
+    if ((*bname != '#') && (*bname != '\0') && ((slash != depth) || (*bname != '/'))) {
       return 1;
     }
     return 0;
@@ -375,4 +444,3 @@ static int objcmpidle(const void *a, const void *b) {
 
   return arft - brft;
 }
-#endif

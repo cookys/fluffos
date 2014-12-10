@@ -3,33 +3,38 @@
 
 #include <functional>
 
-typedef struct object_s object_t;
-typedef struct error_context_s error_context_t;
-struct outbuffer_t;
-
-#define NULL_ERROR_CONTEXT 0
-#define NORMAL_ERROR_CONTEXT 1
-#define CATCH_ERROR_CONTEXT 2
-#define SAFE_APPLY_ERROR_CONTEXT 4
-
 /*
  * backend.c
  */
-extern long current_virtual_time;
-extern object_t *current_heart_beat;
-extern error_context_t *current_error_context;
-extern int time_for_hb;
 
-// API for register event to be executed on each tick.
+// Global event base
+extern struct event_base *g_event_base;
+
+// Initialization of main game loop.
+struct event_base *init_backend();
+
+// This is the main game loop.
+void backend(struct event_base *);
+
+// API for register realtime event.
+// Realtime event will be executed as close to designated walltime as possible.
+struct realtime_event {
+  typedef std::function<void()> callback_type;
+
+  callback_type callback;
+  realtime_event(callback_type &callback) : callback(callback) {}
+};
+void add_realtime_event(realtime_event::callback_type);
+
+// API for registering game tick event.
+// Game ticks provides guaranteed spacing intervals between each invocation.
 struct tick_event {
   bool valid;
 
   typedef std::function<void()> callback_type;
   callback_type callback;
 
-  tick_event(callback_type &callback) :
-      valid(true), callback(callback) {
-  }
+  tick_event(callback_type &callback) : valid(true), callback(callback) {}
 };
 
 // Register a event to run on game ticks. Safe to call from any thread.
@@ -38,20 +43,8 @@ tick_event *add_tick_event(int, tick_event::callback_type);
 // Used in shutdownMudos()
 void clear_tick_events();
 
-void backend(struct event_base *);
-
-void clear_state(void);
-int parse_command(char *, object_t *);
-int set_heart_beat(object_t *, int);
-int query_heart_beat(object_t *);
-int heart_beat_status(outbuffer_t *, int);
-void preload_objects(int);
-void remove_destructed_objects(void);
 void update_load_av(void);
 void update_compile_av(int);
 char *query_load_av(void);
-array_t *get_heart_beats(void);
-int query_time_used(void);
-void call_heart_beat(void);
 
 #endif
